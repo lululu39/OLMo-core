@@ -63,8 +63,9 @@ configuration, manifest digest and parameter counts are recorded there and in
 checkpoints. Held-out language-model loss/perplexity is evaluated at startup,
 every 500 steps and on finish, with a fixed 16-batch evaluation budget.
 Temporary checkpoints are saved every 250 steps, permanent checkpoints every
-1,000 steps and at training completion, retaining at most three permanent
-checkpoints. The same command resumes model, optimizer and trainer/data-loader
+1,000 steps and at training completion. Permanent checkpoint retention is set
+to three; the final checkpoint and last temporary checkpoint can also remain
+at shutdown. The same command resumes model, optimizer and trainer/data-loader
 state from the save folder. For subsequent mixing comparisons, reuse this exact
 manifest, tokenizer, seeds, token budget, batch sizes and evaluation schedule.
 
@@ -73,3 +74,29 @@ Infrastructure validation uses a separately labelled synthetic fixture and
 has completed startup and shows finite losses and stable throughput, estimate
 completion from remaining steps and observed step time, and check near that ETA
 instead of continuously polling the job.
+
+## Completed baseline: September 7, 2026
+
+Run: [olmo3-102m-dense-longdata-2p147bt-s2048-seed1337-20260907](https://wandb.ai/yibozhong657-none/weight-mixing-llm/runs/8d3423f7)
+
+- Training source commit: `a120f698cfff1fc3609ace045784b7952fdea8a5`.
+- Complete mirror: 533 files, 327,077,823,053 original bytes,
+  109,939,409,722 compressed bytes. All 523 Arrow shards were processed.
+- Prepared sample: 5,081,813,472 train tokens and 16,082,374 validation tokens.
+- Manifest SHA-256: `4bf5ab2ba43a00ffbda2397d78ae74526a627bdbb6db2f826c18f83d07388c55`.
+- Completed training: 8,192 steps, 2,147,483,648 tokens, 101,868,032 parameters,
+  both matrix mixing options disabled, 8 H100 GPUs.
+- Final training cross-entropy: 2.698687. Final held-out cross-entropy: 3.120047;
+  perplexity: 22.647436, on the configured fixed 16-batch validation evaluation.
+- Final checkpoint:
+  `/data/yibo/OLMo-core/runs/olmo3-102m-dense-longdata-2p147bt-s2048-seed1337-20260907/step8192`.
+
+The optimizer reached step 8192 at 08:08:42 UTC, and the final checkpoint and
+evaluation completed by 08:08:58 UTC. W&B 0.29 had removed the `quiet` argument
+used by the existing callback, causing distributed teardown to stall after all
+training was complete. The callback was fixed and regression-tested. Attaching
+to the original W&B service flushed its pending final metrics and finalized the
+same run successfully; no optimizer steps were repeated. The stalled workers
+were then terminated and all GPUs released. W&B's total run runtime therefore
+includes this recovery interval: use training logs or measured throughput for
+wall-time comparisons with future mixing runs.
