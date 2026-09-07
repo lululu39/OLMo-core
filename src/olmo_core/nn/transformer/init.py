@@ -6,6 +6,7 @@ from torch.distributed.tensor import DTensor
 
 from olmo_core.config import StrEnum
 from olmo_core.distributed.utils import distribute_like, get_local_tensor
+from olmo_core.nn.matrix_mixing import MixedLinear
 
 if TYPE_CHECKING:
     from ..attention import SequenceMixer
@@ -28,8 +29,14 @@ def _apply_init(init_fun, x: torch.Tensor, *args, **kwargs):
 
 
 def init_linear(
-    m: nn.Linear | nn.Conv1d, *, std: float = 0.02, generator: Optional[torch.Generator] = None
+    m: nn.Linear | nn.Conv1d | MixedLinear,
+    *,
+    std: float = 0.02,
+    generator: Optional[torch.Generator] = None,
 ):
+    if isinstance(m, MixedLinear):
+        m.init_weights(std=std, generator=generator)
+        return
     _apply_init(
         nn.init.trunc_normal_,
         m.weight,

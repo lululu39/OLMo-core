@@ -1,3 +1,4 @@
+from ..matrix_mixing import MatrixMixingConfig
 from .block import (
     LayerNormScaledTransformerBlock,
     MoEHybridReorderedNormTransformerBlock,
@@ -23,6 +24,7 @@ from .init import InitMethod
 from .model import MoETransformer, NormalizedTransformer, Transformer
 
 __all__ = [
+    "MatrixMixingConfig",
     "TransformerType",
     "TransformerConfig",
     "Transformer",

@@ -26,6 +26,7 @@ from ..config import ModelConfig, ModuleConfig
 from ..feed_forward import ActivationFunction, FeedForwardConfig, FeedForwardType
 from ..layer_norm import LayerNormConfig, LayerNormType
 from ..lm_head import LMHeadConfig, LMHeadType
+from ..matrix_mixing import MatrixMixingConfig
 from ..moe import MoEConfig, MoERouterConfig, MoEType
 from ..rope import RoPEConfig, RoPEScalingConfig, RoPEType
 from .init import InitMethod
@@ -332,6 +333,11 @@ class TransformerConfig(ModelConfig):
     embed_scale: Optional[float] = None
     tie_word_embeddings: bool = False
 
+    mlp_matrix_mixing: Optional[MatrixMixingConfig] = None
+    """Mix MLP gate/up/down weights across layers. ``None`` preserves dense MLPs."""
+    attn_matrix_mixing: Optional[MatrixMixingConfig] = None
+    """Mix attention Q/K/V/O weights across layers. ``None`` preserves dense attention."""
+
     def __post_init__(self):
         if self.tie_word_embeddings and self.name == TransformerType.normalized:
             raise OLMoConfigurationError(
@@ -388,6 +394,8 @@ class TransformerConfig(ModelConfig):
                 block_pattern=self.block_pattern,
                 embed_scale=self.embed_scale,
                 tie_word_embeddings=self.tie_word_embeddings,
+                mlp_matrix_mixing=self.mlp_matrix_mixing,
+                attn_matrix_mixing=self.attn_matrix_mixing,
             )
         elif self.name == TransformerType.normalized:
             assert self.embedding_norm is None
@@ -479,7 +487,7 @@ class TransformerConfig(ModelConfig):
         if self.tie_word_embeddings:
             num_params -= self.d_model * self.vocab_size
 
-        return num_params
+        return num_params + self._matrix_mixing_parameter_delta()
 
     @property
     def num_active_params(self) -> int:
@@ -504,7 +512,59 @@ class TransformerConfig(ModelConfig):
         if self.tie_word_embeddings:
             num_active_params -= self.d_model * self.vocab_size
 
-        return num_active_params
+        return num_active_params + self._matrix_mixing_parameter_delta()
+
+    def _matrix_mixing_parameter_delta(self) -> int:
+        if self.mlp_matrix_mixing is None and self.attn_matrix_mixing is None:
+            return 0
+        if self.name != TransformerType.default or self.init_method == InitMethod.normalized:
+            raise OLMoConfigurationError("Matrix mixing requires a standard dense transformer")
+
+        signatures = {}
+        delta = 0
+        for block in self.resolved_block_configs:
+            for config, family in (
+                (self.mlp_matrix_mixing, "mlp"),
+                (self.attn_matrix_mixing, "attn"),
+            ):
+                if config is None:
+                    continue
+                config.validate()
+                if family == "mlp":
+                    ff = block.feed_forward
+                    if ff is None or ff.name != FeedForwardType.default:
+                        raise OLMoConfigurationError("MLP mixing requires standard dense MLPs")
+                    shapes = [(ff.hidden_size, self.d_model)] * 2 + [(self.d_model, ff.hidden_size)]
+                    dtype = ff.dtype or DType.float32
+                else:
+                    att = block.sequence_mixer
+                    if not isinstance(att, AttentionConfig) or att.name != AttentionType.default:
+                        raise OLMoConfigurationError(
+                            "Attention mixing requires separate standard Q/K/V/O projections"
+                        )
+                    head_dim = att.head_dim or self.d_model // att.n_heads
+                    q_dim = att.n_heads * head_dim
+                    kv_dim = (att.n_kv_heads or att.n_heads) * head_dim
+                    shapes = [
+                        (q_dim, self.d_model),
+                        (kv_dim, self.d_model),
+                        (kv_dim, self.d_model),
+                        (self.d_model, q_dim),
+                    ]
+                    dtype = att.dtype
+                for idx, shape in enumerate(shapes):
+                    key = (family, idx)
+                    signature = (shape, dtype)
+                    size = math.prod(shape)
+                    if key not in signatures:
+                        signatures[key] = signature
+                        delta += config.num_bases * size
+                    elif signatures[key] != signature:
+                        raise OLMoConfigurationError(
+                            f"Matrix mixing requires identical shapes and dtypes across layers for {family}"
+                        )
+                    delta += config.num_bases - size
+        return delta
 
     @property
     def num_non_embedding_params(self) -> int:

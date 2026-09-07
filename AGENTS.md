@@ -2,6 +2,18 @@
 
 This file provides guidance to agents like Claude Code (claude.ai/code) and Codex (chatgpt.com/codex) when working with code in this repository.
 
+## Rules
+
+- Push each completed repository task to `origin main` unless explicitly instructed otherwise.
+- Use the repository-local `tokens.txt` token with GitHub username `yibozhong` for this repository. Keep authentication non-interactive.
+- Keep `/tokens.txt` in `.gitignore`; never print, stage, commit, or embed its contents in a remote URL or command-line argument.
+- Push with `GIT_ASKPASS= SSH_ASKPASS= git -c credential.helper= -c credential.username=yibozhong push origin main`, supplying the token through a temporary protected credential mechanism; remove temporary credentials afterward.
+- Do not change shared Codex/Claude credential profiles for repository operations.
+
+## Research Goal
+
+Study the effect of matrix mixing for LLM training: compare dense OLMo/OLMo3 pretraining against static cross-layer soft parameter sharing, with jointly trained random weight bases and layer-specific learned linear mixing coefficients. Support independent MLP (gate/up/down) and attention (Q/K/V/O) mixing options.
+
 ## Overview
 
 OLMo-core is AI2's training library for the Open Language Model (OLMo) series. It provides modular components for transformer architectures, distributed training, data loading, and evaluation.

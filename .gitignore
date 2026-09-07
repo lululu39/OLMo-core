@@ -60,3 +60,6 @@ site/
 /scratch/
 core
 /dataset-cache/
+
+# Local Git credentials (never commit)
+/tokens.txt

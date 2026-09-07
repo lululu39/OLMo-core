@@ -17,6 +17,7 @@ from olmo_core.exceptions import OLMoConfigurationError
 from olmo_core.nn.attention.base import SequenceMixer, SequenceMixerConfig
 from olmo_core.nn.attention.kv_cache import KVCacheManager
 from olmo_core.nn.attention.recurrent import GatedDeltaNet, GatedDeltaNetConfig
+from olmo_core.nn.matrix_mixing import linear_parameter_count
 
 from ..buffer_cache import BufferCache
 from ..config import ModuleConfig
@@ -796,7 +797,7 @@ class Attention(SequenceMixer):
         - Sliding window attention (reduced effective sequence length)
         """
         # 6 FLOPs per parameter (2 ops * 3 for forward+backward)
-        param_flops = 6 * sum(p.numel() for p in self.parameters())
+        param_flops = 6 * linear_parameter_count(self)
 
         # Attention computation (QK^T and Attn*V)
         # 12x multiplier: 2 matmuls * 2 ops each * 3 for forward+backward
@@ -1150,7 +1151,7 @@ class FusedAttention(SequenceMixer):
 
     def num_flops_per_token(self, seq_len: int) -> int:
         # 6 FLOPs per parameter (2 ops * 3 for forward+backward)
-        param_flops = 6 * sum(p.numel() for p in self.parameters())
+        param_flops = 6 * linear_parameter_count(self)
 
         # Attention computation (QK^T and Attn*V)
         # 12x multiplier: 2 matmuls * 2 ops each * 3 for forward+backward

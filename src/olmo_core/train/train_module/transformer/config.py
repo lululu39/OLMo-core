@@ -92,6 +92,7 @@ class TransformerPipelineParallelConfig(PipelineParallelConfig):
     def split_model(
         self, model: Transformer, *, pp_mesh: DeviceMesh, device: torch.device
     ) -> Tuple[List[PipelineStage], List[Transformer]]:
+        model._check_matrix_mixing_support("pipeline parallelism")
         split_points = self.get_split_points(model.n_layers)
         num_stages = len(split_points) + 1
 

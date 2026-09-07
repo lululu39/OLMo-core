@@ -15,6 +15,7 @@ from ..doc_utils import beta_feature
 from ..exceptions import OLMoConfigurationError
 from .config import ModuleConfig
 from .functional import l2_normalize
+from .matrix_mixing import linear_parameter_count
 from .utils import get_tp_wrappers
 
 __all__ = [
@@ -206,7 +207,7 @@ class FeedForward(nn.Module):
     def num_flops_per_token(self, seq_len: int) -> int:
         del seq_len
         # 6 FLOPs per parameter (2 ops * 3 for forward+backward)
-        return 6 * sum(p.numel() for p in self.parameters())
+        return 6 * linear_parameter_count(self)
 
 
 @beta_feature

@@ -17,6 +17,9 @@ from typing import (
 import torch
 import torch.nn as nn
 from torch.distributed import DeviceMesh
+from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+    ActivationWrapper,
+)
 from torch.distributed.fsdp import FSDPModule, MixedPrecisionPolicy, fully_shard
 from torch.distributed.tensor import Replicate, Shard
 from torch.distributed.tensor.parallel import (
@@ -47,6 +50,7 @@ from ..buffer_cache import BufferCache
 from ..functional import l2_normalize
 from ..layer_norm import LayerNormConfig
 from ..lm_head import LMHeadConfig, LMLossImplementation, LMOutputWithLoss
+from ..matrix_mixing import MatrixMixingConfig, mix_block_projections
 from ..moe import MoEBase
 from ..rope import RoPEBuffers, RotaryEmbeddingBase
 from ..utils import selective_checkpointing_context_fn
@@ -97,6 +101,8 @@ class Transformer(nn.Module):
     :param block_overrides: Overrides for specific blocks. Not supported if `block` is a dict of named blocks.
     :param block_pattern: The pattern of blocks to use. Required if `block` is a dict of named blocks.
     :param embed_scale: The scale factor for the embeddings.
+    :param mlp_matrix_mixing: Optional cross-layer mixing of MLP weights.
+    :param attn_matrix_mixing: Optional cross-layer mixing of Q/K/V/O weights.
     """
 
     def __init__(
@@ -118,6 +124,8 @@ class Transformer(nn.Module):
         block_pattern: Optional[List[str]] = None,
         embed_scale: Optional[float] = None,
         tie_word_embeddings: bool = False,
+        mlp_matrix_mixing: Optional[MatrixMixingConfig] = None,
+        attn_matrix_mixing: Optional[MatrixMixingConfig] = None,
     ):
         super().__init__()
 
@@ -146,6 +154,14 @@ class Transformer(nn.Module):
             block_overrides=block_overrides,
         )
 
+        self.matrix_mixing_enabled = mlp_matrix_mixing is not None or attn_matrix_mixing is not None
+        if self.matrix_mixing_enabled:
+            if init_std <= 0 or init_method == InitMethod.normalized:
+                raise OLMoConfigurationError(
+                    "Matrix mixing requires positive init_std and non-normalized initialization"
+                )
+            self.matrix_bases = nn.ModuleDict()
+
         self.blocks = nn.ModuleDict()
         for block_idx in range(n_layers):
             self.blocks[str(block_idx)] = self._validate_block(
@@ -157,6 +173,14 @@ class Transformer(nn.Module):
                     cache=cache,
                 )
             )
+            if self.matrix_mixing_enabled:
+                mix_block_projections(
+                    self.blocks[str(block_idx)],
+                    self.matrix_bases,
+                    mlp=mlp_matrix_mixing,
+                    attn=attn_matrix_mixing,
+                    init_std=init_std,
+                )
         self.lm_head = lm_head.build(
             d_model=d_model, vocab_size=vocab_size, init_device=init_device
         )
@@ -312,6 +336,10 @@ class Transformer(nn.Module):
         # Re-establish weight tying since `to_empty` above allocates fresh storage.
         if self.tie_word_embeddings:
             self._tie_weights()
+
+        if self.matrix_mixing_enabled:
+            for bank in self.matrix_bases.values():
+                bank.init_weights(generator=generator)
 
         for block in self.blocks.values():
             # This might fail if it's wrapped.
@@ -614,12 +642,18 @@ class Transformer(nn.Module):
         else:
             return h
 
+    def _check_matrix_mixing_support(self, feature: str) -> None:
+        if self.matrix_mixing_enabled:
+            raise OLMoConfigurationError(f"Matrix mixing does not yet support {feature}")
+
     def apply_fp8(self, float8_config: Float8Config):
         """
         Use an FP8 recipe on most linear layers.
         """
         if not float8_config.enabled:
             return
+
+        self._check_matrix_mixing_support("FP8")
 
         modules_to_ignore = set()
         if self.lm_head is not None:
@@ -638,6 +672,7 @@ class Transformer(nn.Module):
         """
         Prepare the model for pipeline parallelism after it's been split into stages.
         """
+        self._check_matrix_mixing_support("pipeline parallelism")
         for block in self.blocks.values():
             block = cast(TransformerBlockBase, block)
             block.apply_pp(pp_mesh)
@@ -651,6 +686,7 @@ class Transformer(nn.Module):
         :param loss_parallel: Set to ``True`` if parallelizing the loss function as well.
         :param float8_enabled: Set this to ``True`` if training with float8 linear layers.
         """
+        self._check_matrix_mixing_support("tensor parallelism")
         if self.tie_word_embeddings and (
             self.lm_head is None
             or self.lm_head.loss_implementation == LMLossImplementation.fused_linear
@@ -848,7 +884,13 @@ class Transformer(nn.Module):
         """
         for block in self.blocks.values():
             block = cast(TransformerBlockBase, block)
-            block.apply_compile()
+            if self.matrix_mixing_enabled and isinstance(block, ActivationWrapper):
+                # Capture checkpointing in the compiled graph as well as the block.
+                # Compiling only its inner module can reorder saved bank tensors
+                # between forward and checkpoint recomputation.
+                block.compile(fullgraph=False)
+            else:
+                block.apply_compile()
 
         if self.lm_head is not None:
             self.lm_head.compile(fullgraph=False)
@@ -880,6 +922,8 @@ class Transformer(nn.Module):
             in more aggressive prefetching.
         :wrapping_strategy: The wrapping strategy.
         """
+        if pp_enabled:
+            self._check_matrix_mixing_support("pipeline parallelism")
         mp_policy = MixedPrecisionPolicy(
             param_dtype=param_dtype or self.dtype, reduce_dtype=reduce_dtype
         )
@@ -915,7 +959,13 @@ class Transformer(nn.Module):
             if self.lm_head is not None and not self.tie_word_embeddings:
                 fully_shard(self.lm_head, reshard_after_forward=False, **fsdp_config)
 
-        fully_shard(self, reshard_after_forward=reshard_after_forward, **fsdp_config)
+        # Shared bases are used inside every block. Keep them in the root group and
+        # materialized through backward, including activation-checkpoint recomputation.
+        fully_shard(
+            self,
+            reshard_after_forward=False if self.matrix_mixing_enabled else reshard_after_forward,
+            **fsdp_config,
+        )
         # Some inputs need to be on CPU initially, but FSDP will move everything to model's
         # device if we don't hide it.
         self.register_forward_pre_hook(_hide_cpu_inputs_from_torch, prepend=True, with_kwargs=True)
@@ -924,7 +974,13 @@ class Transformer(nn.Module):
         )
 
         if prefetch_factor > 0:
-            blocks = cast(List[FSDPModule], list(self.blocks.values()))
+            # Checkpoint wrappers delegate apply_fsdp() to the wrapped block;
+            # prefetch requires the actual FSDPModule, not the outer wrapper.
+            blocks = []
+            for module in self.blocks.values():
+                while isinstance(module, ActivationWrapper):
+                    module = module._checkpoint_wrapped_module
+                blocks.append(cast(FSDPModule, module))
             for i in range(len(blocks)):
                 block = blocks[i]
                 if i + 1 < len(blocks):
